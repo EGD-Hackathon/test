@@ -474,30 +474,188 @@ randomx_dataset* dataset = randomx_alloc_dataset(flags);
 
 ### 3.4 第四阶段：Dataset块生成（7.3节）
 
-#### 3.4.1 初始化函数调用
+#### 3.4.1 Dataset生成详细流程
+
+Dataset的生成过程是从已准备好的Cache中构建每个64字节的Dataset项目。
+
+##### 输入输出变量规格
+**输入变量**：
+- `cache`: 已初始化的Cache结构 (256MB + 8个SuperscalarHash程序)
+- `itemNumber`: Dataset项目编号 (64位无符号整数, 0 ≤ itemNumber < 34,078,719)
+- `startItem`: 起始项目编号 (用于多线程, 64位无符号整数)
+- `itemCount`: 要生成的项目数量 (32位无符号整数)
+
+**输出变量**：
+- `dataset->memory`: 2.03GB Dataset缓冲区 (uint8_t数组)
+- 每个项目: 64字节 = 8个64位寄存器值
+
+**中间变量**：
+- `registerValue`: 当前缓存索引 (64位整数)
+- `registers[8]`: 8个64位整数寄存器 (r0-r7)
+- `mixBlock[8]`: 从Cache读取的64字节混合数据 (8个64位整数)
+- `cacheIndex`: Cache访问索引 (64位整数)
+
+##### Dataset项目生成伪代码实现
+基于 `Panthera/src/dataset.cpp:162-189` 和规格7.3节：
+
+```
+算法: Generate_Dataset_Item
+输入: 
+    cache: RandomX Cache结构
+    itemNumber: 项目编号 (0..34,078,718)
+输出:
+    dataset_item[64字节]: 单个Dataset项目
+
+开始算法:
+    // 第一阶段: 寄存器初始化 (规格7.3节表7.3.1)
+    设置 r0 = (itemNumber + 1) * 6364136223846793005  // 64位整数乘法
+    设置 registers[0] = r0
+    设置 registers[1] = r0 XOR 9298411001130361340   // 64位XOR操作
+    设置 registers[2] = r0 XOR 12065312585734608966
+    设置 registers[3] = r0 XOR 9306329213124626780
+    设置 registers[4] = r0 XOR 5281919268842080866
+    设置 registers[5] = r0 XOR 10536153434571861004
+    设置 registers[6] = r0 XOR 3398623926847679864
+    设置 registers[7] = r0 XOR 9549104520008361294
+    
+    设置 registerValue = itemNumber  // 初始缓存索引
+    
+    // 第二阶段: Cache访问循环 (8次迭代)
+    对于 i = 0 到 RANDOMX_CACHE_ACCESSES-1:  // i = 0,1,2,3,4,5,6,7
+        
+        // 步骤1: 计算Cache访问地址
+        cacheIndex = registerValue % (CacheSize / 64)  // 模运算: 模4,194,304
+        cache_offset = cacheIndex * 64  // 计算字节偏移
+        
+        // 步骤2: 从Cache读取64字节数据块
+        对于 j = 0 到 7:  // 读取8个64位整数
+            mixBlock[j] = 读取64位整数(cache.memory[cache_offset + j*8])
+        结束对于
+        
+        // 步骤3: 寄存器与Cache数据混合
+        对于 r = 0 到 7:
+            registers[r] = registers[r] XOR mixBlock[r]  // 64位XOR操作
+        结束对于
+        
+        // 步骤4: 执行第i个SuperscalarHash程序
+        // 注意: SuperscalarHash会修改registers数组的内容
+        执行 cache.programs[i].run(registers[0..7], cache.reciprocalCache)
+        
+        // 步骤5: 更新registerValue为最长依赖链寄存器
+        longest_chain_register = 分析SuperscalarHash依赖链并找到最长的寄存器索引
+        registerValue = registers[longest_chain_register]
+        
+    结束对于  // Cache访问循环
+    
+    // 第三阶段: 输出Dataset项目 (小端序存储)
+    对于 r = 0 到 7:
+        存储64位整数 registers[r] 到 dataset_item[r*8..(r+1)*8-1]
+    结束对于
+    
+    返回 dataset_item[64字节]
+结束算法
+
+// 完整Dataset生成主算法
+算法: Generate_Complete_Dataset  
+输入:
+    cache: 已初始化的Cache
+输出:
+    dataset: 完整的2.03GB Dataset
+
+开始算法:
+    分配 dataset.memory[2,181,038,016字节]  // 精确的Dataset大小
+    设置 total_items = 34,078,719  // Dataset项目总数
+    
+    // 串行生成 (单线程版本)
+    对于 item = 0 到 total_items-1:
+        dataset_item = Generate_Dataset_Item(cache, item)
+        存储 dataset_item 到 dataset.memory[item * 64..(item+1)*64-1]
+        
+        // 可选: 显示进度 (每100万个项目)
+        如果 item % 1000000 == 0:
+            显示进度: "已生成 {item/1000000}M / 34.1M 项目"
+        结束如果
+    结束对于
+    
+    返回 dataset
+结束算法
+
+// 多线程并行生成版本
+算法: Generate_Dataset_Parallel
+输入:
+    cache: 已初始化的Cache
+    thread_count: 线程数量 (推荐CPU核心数)
+输出:
+    dataset: 完整Dataset
+
+开始算法:
+    分配 dataset.memory[2,181,038,016字节]
+    设置 total_items = 34,078,719
+    设置 items_per_thread = total_items / thread_count
+    
+    对于 t = 0 到 thread_count-1:
+        start_item = t * items_per_thread
+        如果 t == thread_count-1:
+            end_item = total_items  // 最后一个线程处理剩余项目
+        否则:
+            end_item = (t+1) * items_per_thread
+        结束如果
+        
+        启动线程t: 
+            对于 item = start_item 到 end_item-1:
+                dataset_item = Generate_Dataset_Item(cache, item)  
+                存储到 dataset.memory[item * 64..(item+1)*64-1]
+            结束对于
+    结束对于
+    
+    等待所有线程完成
+    返回 dataset
+结束算法
+```
+
+##### Dataset生成数据流图
+```
+输入: cache (256MB + 8程序) + itemNumber
+  ↓
+[寄存器初始化] → registers[0..7] (基于规格7.3节常量表)
+  registers[0] = (itemNumber+1) * 6364136223846793005
+  registers[1..7] = registers[0] XOR 各自常量
+  ↓ registerValue = itemNumber
+[Cache访问循环 - 8次迭代]
+  ↓
+对于 i = 0..7:
+  [计算Cache索引] → cacheIndex = registerValue % 4,194,304
+    ↓
+  [读取Cache数据] → mixBlock[8×64位] = cache.memory[cacheIndex*64]
+    ↓  
+  [寄存器混合] → registers[r] ⊕= mixBlock[r] (r=0..7)
+    ↓
+  [SuperscalarHash执行] → cache.programs[i].run(registers)
+    ↓ (SuperscalarHash修改registers内容)
+  [依赖链分析] → registerValue = registers[最长依赖链寄存器]
+  ↓
+结束循环
+  ↓
+[输出64字节] → dataset_item = registers[0..7] (小端序8×64位)
+```
+
+**性能和循环特征分析**（基于 `Panthera/src/dataset.cpp:162-189`）：
+- **主循环次数**: 每个Dataset项目8次Cache访问循环
+- **总调用次数**: 34,078,719项目 × 8次访问 = 272,629,752次Cache访问
+- **SuperscalarHash调用**: 每个项目调用8个不同的程序实例
+- **内存读取量**: 272,629,752次 × 64字节 = 约17.5GB的Cache读取
+- **寄存器操作**: 每个项目64次64位XOR操作 + SuperscalarHash计算
+- **并行度**: 不同Dataset项目可以完全并行生成（无依赖关系）
+- **内存访问模式**: 伪随机但确定性的Cache访问序列
+- **生成时间**: 单线程约需要几分钟到几十分钟（取决于CPU性能）
+
+#### 3.4.2 初始化函数调用
 ```cpp
 randomx_init_dataset(dataset, cache, startItem, itemCount);
 ```
 - **实现位置**: `Panthera/src/randomx.cpp:182-189` [16]
 - **支持多线程**: 可以分段并行初始化不同的Dataset项目
-
-#### 3.4.2 单个Dataset项目生成算法（规格7.3节）
-- **核心函数**: `initDatasetItem(randomx_cache* cache, uint8_t* out, uint64_t itemNumber)`
-- **实现位置**: `Panthera/src/dataset.cpp:162-189` [17]
-- **算法流程**（按规格文档7.3节）:
-  1. **寄存器初始化**:
-     - `r0 = (itemNumber + 1) * 6364136223846793005`
-     - `r1 = r0 ^ 9298411001130361340`
-     - `r2 = r0 ^ 12065312585734608966`
-     - `r3 = r0 ^ 9306329213124626780`
-     - `r4 = r0 ^ 5281919268842080866`
-     - `r5 = r0 ^ 10536153434571861004`
-     - `r6 = r0 ^ 3398623926847679864`
-     - `r7 = r0 ^ 9549104520008361294`
-  2. **设置初始索引**: `cacheIndex = itemNumber`
-  3. **循环处理**（`i = 0` 到 `RANDOMX_CACHE_ACCESSES-1 = 7`）:
-     - 从Cache加载64字节项目（索引为`cacheIndex % Cache项目总数`）
-     - 执行`SuperscalarHash[i](r0-r7)`
+- **并行限制**: 根据设计文档，DRAM每个bank group约支持1500 H/s的吞吐量 [28]
      - 将所有寄存器与加载的64字节数据进行XOR
      - 设置`cacheIndex`为具有最长依赖链的寄存器值
   4. **输出**: 将寄存器`r0-r7`按小端格式连接成最终的64字节Dataset项目
@@ -635,3 +793,8 @@ Dataset的生成是一个复杂的多阶段过程，需要精确的数据准备�
 [33] `Panthera/doc/design.md` 附录B - 性能仿真结果
 [34] `Panthera/doc/design.md` 附录C - RandomX运行时分布
 [35] `Panthera/doc/design.md` 附录E - SuperscalarHash分析
+[36] `Panthera/src/dataset.cpp:162-189` - initDatasetItem函数实现
+[37] `Panthera/doc/specs.md` 表7.3.1 - Dataset寄存器初始化常量表
+[38] `Panthera/src/superscalar.cpp` - SuperscalarHash程序执行引擎
+[39] `Panthera/src/tests/api-example1.c` - 单线程Dataset生成示例
+[40] `Panthera/src/tests/api-example2.cpp` - 多线程Dataset生成示例
