@@ -1,0 +1,107 @@
+graph TD
+    A[输入密钥<br/>0-480位] --> B[Blake2Generator初始化<br/>512位状态机]
+    B --> C[随机数生成器<br/>64字节缓冲区]
+    
+    C --> D[生成循环开始<br/>最多170周期]
+    D --> E[解码器配置选择<br/>6种配置: 4-8-4, 7-3-3-3, etc.]
+    
+    E --> F{解码器类型判断}
+    F -->|IMULH_R类型| G[选择配置5<br/>3-3-10槽位]
+    F -->|乘法不足| H[选择配置4<br/>4-4-4-4槽位]
+    F -->|IMUL_RCP类型| I[选择配置0/3<br/>4-8-4 / 4-9-3槽位]
+    F -->|其他类型| J[随机选择配置0-3<br/>标准ALU配置]
+    
+    G --> K[指令槽位填充循环]
+    H --> K
+    I --> K
+    J --> K
+    
+    K --> L{槽位大小判断}
+    L -->|3字节槽位| M[生成ISUB_R/IXOR_R<br/>简单ALU指令]
+    L -->|3字节末槽| N[生成ISUB_R/IXOR_R/IMULH_R<br/>包含高精度乘法]
+    L -->|4字节槽位| O[生成IROR_C/IADD_RS<br/>或强制IMUL_R]
+    L -->|7/8/9字节槽位| P[生成IADD_C/IXOR_C<br/>带立即数指令]
+    L -->|10字节槽位| Q[生成IMUL_RCP<br/>倒数乘法指令]
+    
+    M --> R[指令参数生成]
+    N --> R
+    O --> R
+    P --> R
+    Q --> R
+    
+    R --> S[端口调度算法<br/>模拟CPU执行]
+    S --> T{端口可用性检查}
+    T -->|P0端口空闲| U[分配到P0<br/>通用ALU端口]
+    T -->|P1端口空闲| V[分配到P1<br/>乘法专用端口]
+    T -->|P5端口空闲| W[分配到P5<br/>通用ALU端口]
+    T -->|端口饱和| X[标记端口饱和<br/>准备终止]
+    
+    U --> Y[寄存器分配算法]
+    V --> Y
+    W --> Y
+    
+    Y --> Z[目标寄存器选择<br/>R0-R7可用性检查]
+    Z --> AA[源寄存器选择<br/>依赖关系检查]
+    AA --> BB[立即数/修饰符生成<br/>32位随机值]
+    
+    BB --> CC[指令完整性验证]
+    CC --> DD[程序缓冲区写入<br/>64位指令格式]
+    DD --> EE[寄存器延迟更新<br/>依赖链维护]
+    
+    EE --> FF{继续生成判断}
+    FF -->|周期<170 & 未饱和 & 程序<MaxSize| GG[下一个槽位/周期]
+    FF -->|终止条件满足| HH[程序生成完成]
+    
+    GG --> K
+    
+    HH --> II[性能指标计算]
+    II --> JJ[IPC计算<br/>指令数/退休周期]
+    JJ --> KK[CPU/ASIC延迟分析<br/>关键路径识别]
+    KK --> LL[地址寄存器选择<br/>最高ASIC延迟寄存器]
+    
+    LL --> MM[IMUL_RCP指令扫描<br/>倒数缓存构建]
+    MM --> NN[倒数值计算<br/>32位立即数→64位倒数]
+    NN --> OO[程序完成<br/>SuperscalarProgram对象]
+    
+    X --> HH
+    
+    OO --> PP{是否生成完8个程序?}
+    PP -->|否| QQ[增加nonce<br/>下一个程序]
+    PP -->|是| RR[所有程序完成<br/>返回Cache结构]
+    
+    QQ --> B
+    
+    subgraph "位宽标注"
+        direction TB
+        S1[密钥: 0-480位]
+        S2[Blake2状态: 512位]
+        S3[随机数缓冲: 512位]
+        S4[指令格式: 64位]
+        S5[端口状态: 1020位]
+        S6[寄存器状态: 832位]
+        S7[程序大小: ~28KB]
+        S8[倒数缓存: 可变]
+    end
+    
+    subgraph "终止条件"
+        direction TB
+        T1[时间限制: 170周期]
+        T2[端口饱和: 3端口全占用]
+        T3[程序长度: 达到MaxSize]
+        T4[随机终止: 概率事件]
+    end
+    
+    style A fill:#e1f5fe
+    style B fill:#e8f5e8
+    style C fill:#fff3e0
+    style OO fill:#f3e5f5
+    style RR fill:#ffebee
+    
+    style S1 fill:#e1f5fe
+    style S2 fill:#e8f5e8
+    style S3 fill:#fff3e0
+    style S4 fill:#f3e5f5
+    style S5 fill:#ffebee
+    style S6 fill:#e0f2f1
+    style S7 fill:#fce4ec
+    style S8 fill:#f1f8e9 
